@@ -1,0 +1,7 @@
+server/
+tests/
+playwright.config.cjs
+render.yaml
+.env
+.legacy_archive_*/
+.trunk/
