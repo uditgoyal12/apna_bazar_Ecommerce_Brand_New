@@ -1,7 +1,7 @@
 server/
 tests/
 playwright.config.cjs
-render.yaml
+deploy/
 .env
 .legacy_archive_*/
 .trunk/
