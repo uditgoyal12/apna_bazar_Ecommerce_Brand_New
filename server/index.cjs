@@ -12,7 +12,10 @@ if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '100kb' }), cookieParser());
-const origins = (process.env.FRONTEND_URL || 'http://localhost:3000,http://127.0.0.1:3000').split(',');
+const origins = new Set([
+  ...(process.env.FRONTEND_URL || 'http://localhost:3000,http://127.0.0.1:3000').split(','),
+  'https://ecoproject-rho.vercel.app',
+].map(origin => origin.trim()).filter(Boolean));
 app.use('/api', (req, res, next) => {
   if (req.headers.origin && !origins.includes(req.headers.origin) && req.headers.origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Origin not allowed' });
   if (req.headers.origin) { res.header('Access-Control-Allow-Origin', req.headers.origin); res.header('Vary', 'Origin'); res.header('Access-Control-Allow-Credentials', 'true'); }
