@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /cart
+Disallow: /checkout
+Disallow: /profile
+Disallow: /wishlist
+Disallow: /order-confirmation
+
+Sitemap: https://ecoproject-rho.vercel.app/sitemap.xml

@@ -491,6 +491,21 @@ export function Product() {
         .then(setRecent)
         .catch(() => setRecent([]));
   }, [p?.id]);
+  useEffect(() => {
+    if (!p?.id) return undefined;
+    const description = plain(p.description).slice(0, 155) || `Shop ${p.name} by ${p.brand} at Apna Bazar.`;
+    document.title = `${p.name} by ${p.brand} | Apna Bazar`;
+    document.head.querySelector('meta[name="description"]')?.setAttribute('content', description);
+    document.head.querySelector('meta[property="og:title"]')?.setAttribute('content', `${p.name} | Apna Bazar`);
+    document.head.querySelector('meta[property="og:description"]')?.setAttribute('content', description);
+    document.head.querySelector('meta[property="og:type"]')?.setAttribute('content', 'product');
+    let image = document.head.querySelector('meta[property="og:image"]');
+    if (!image) { image = document.createElement('meta'); image.setAttribute('property', 'og:image'); document.head.appendChild(image); }
+    image.setAttribute('content', Array.isArray(p.pic) ? p.pic[0] : p.pic);
+    const script = document.createElement('script'); script.type = 'application/ld+json'; script.id = 'product-schema'; script.textContent = JSON.stringify({ '@context': 'https://schema.org', '@type': 'Product', name: p.name, image: p.pic, description, sku: p.id, brand: { '@type': 'Brand', name: p.brand }, offers: { '@type': 'Offer', priceCurrency: 'INR', price: p.finalPrice, availability: p.stockQuantity > 0 ? 'https://schema.org/InStock' : 'https://schema.org/OutOfStock', url: window.location.href } });
+    document.head.querySelector('#product-schema')?.remove(); document.head.appendChild(script);
+    return () => script.remove();
+  }, [p]);
   if (loading) return <Loading />;
   if (error)
     return (
@@ -597,7 +612,7 @@ export function Product() {
           </div>
           <p className={selected.stockQuantity ? "stock-status" : "muted"}>
             {selected.stockQuantity
-              ? `${selected.stockQuantity < 6 ? `Only ${selected.stockQuantity} left` : "In stock"} ? Ready for your wardrobe`
+              ? `${selected.stockQuantity < 6 ? `Only ${selected.stockQuantity} left` : "In stock"} · Ready for your wardrobe`
               : "Currently out of stock"}
           </p>
           <div className="add-row">
@@ -642,7 +657,7 @@ export function Product() {
                 }
               }}
             >
-              {busy ? "Adding?" : "Add to bag"}
+              {busy ? "Adding…" : "Add to bag"}
               <Icon name="bag" />
             </button>
           </div>
@@ -673,7 +688,7 @@ export function Product() {
           <div className="detail-perks">
             <p>
               <Icon name="truck" />
-              Complimentary delivery on orders ?1,999+
+              Complimentary delivery on orders ₹1,999+
             </p>
             <p>
               <Icon name="shield" />
@@ -683,7 +698,7 @@ export function Product() {
           <details open>
             <summary>The details</summary>
             <p>
-              {p.brand} ? {p.subcategory} ? {selected.color} ? Size{" "}
+              {p.brand} · {p.subcategory} · {selected.color} · Size{" "}
               {selected.size}
             </p>
           </details>
