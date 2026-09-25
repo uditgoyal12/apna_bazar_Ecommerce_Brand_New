@@ -1,0 +1,10 @@
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '../.env'), quiet: true });
+if (process.env.DNS_SERVERS) require('dns').setServers(process.env.DNS_SERVERS.split(','));
+const { MongoClient } = require('mongodb');
+const { v2: cloudinary } = require('cloudinary');
+if (!process.env.MONGODB_URI) throw new Error('MONGODB_URI is required');
+const client = new MongoClient(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15000 });
+const db = client.db(process.env.MONGODB_DB || 'apna_bazar');
+cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET, secure: true });
+module.exports = { client, db, cloudinary };

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: apna-bazar-ecommerce-api
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci --omit=dev
+    startCommand: npm run api
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: COOKIE_SAME_SITE
+        value: none
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: apna_bazar
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: REACT_APP_SITE_NAME
+        value: APNA BAZAR
