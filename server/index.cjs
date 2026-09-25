@@ -17,7 +17,7 @@ const origins = new Set([
   'https://ecoproject-rho.vercel.app',
 ].map(origin => origin.trim()).filter(Boolean));
 app.use('/api', (req, res, next) => {
-  if (req.headers.origin && !origins.includes(req.headers.origin) && req.headers.origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Origin not allowed' });
+  if (req.headers.origin && !origins.has(req.headers.origin) && req.headers.origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'Origin not allowed' });
   if (req.headers.origin) { res.header('Access-Control-Allow-Origin', req.headers.origin); res.header('Vary', 'Origin'); res.header('Access-Control-Allow-Credentials', 'true'); }
   res.header('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With, Idempotency-Key');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
