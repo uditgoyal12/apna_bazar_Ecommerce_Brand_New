@@ -29,6 +29,7 @@ const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch
 const fail = (message, status = 400) => { const error = new Error(message); error.status = status; throw error; };
 const str = (v, max = 200) => typeof v === 'string' ? v.trim().slice(0, max) : '';
 const email = v => { const x = str(v).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x)) fail('Enter a valid email'); return x; };
+const variantsFor = p => Array.isArray(p?.variants) && p.variants.length ? p.variants : [{ id: 'legacy', color: String(p?.color || 'Default'), size: String(p?.size || 'One size'), stockQuantity: Number(p?.stockQuantity || 0) }];
 const publicUser = u => { const { passwordHash, password, _id, ...safe } = u; return safe; };
 const production = process.env.NODE_ENV === 'production';
 const cookieOptions = {
@@ -91,6 +92,7 @@ app.get('/api/products', wrap(async (req, res) => {
   res.json({ items, total, page, pages: Math.ceil(total / limit) });
 }));
 app.get('/api/products/:id', wrap(async (req, res) => { const item = await db.collection('products').findOne({ id: req.params.id, active: { $ne: false } }, { projection: { _id: 0 } }); if (!item) fail('Product not found', 404); res.json(item); }));
+app.get('/api/recent-products', wrap(async (req, res) => { const ids = str(req.query.ids, 1000).split(',').filter(Boolean).slice(0, 12); const rows = await db.collection('products').find({ id: { $in: ids }, active: { $ne: false } }, { projection: { _id: 0 } }).toArray(); res.json(ids.map(id => rows.find(row => row.id === id)).filter(Boolean)); }));
 let catalogCache = null;
 let catalogCacheUntil = 0;
 const clearCatalogCache = () => { catalogCache = null; catalogCacheUntil = 0; };
@@ -105,7 +107,7 @@ app.get('/api/catalog', wrap(async (req, res) => {
 async function getCart(user) {
   const rows = await db.collection('cart').find({ user }, { projection: { _id: 0 } }).toArray();
   const products = await db.collection('products').find({ id: { $in: rows.map(r => r.product) } }).toArray();
-  const items = rows.map(row => { const p = products.find(p => p.id === row.product); return { ...row, name: p?.name || 'Unavailable product', pic: p?.pic || [], price: p?.finalPrice || 0, stockQuantity: p?.active === false ? 0 : p?.stockQuantity || 0, available: !!p && p.active !== false, total: (p?.finalPrice || 0) * row.qty }; });
+  const items = rows.map(row => { const p = products.find(p => p.id === row.product), variant = variantsFor(p).find(v => v.id === row.variantId) || variantsFor(p).find(v => v.size === row.size && v.color === row.color) || variantsFor(p)[0]; return { ...row, size: variant?.size || row.size, color: variant?.color || row.color, name: p?.name || 'Unavailable product', pic: p?.pic || [], price: p?.finalPrice || 0, stockQuantity: p?.active === false ? 0 : variant?.stockQuantity || 0, available: !!p && p.active !== false && !!variant, total: (p?.finalPrice || 0) * row.qty }; });
   const subtotal = Math.round(items.reduce((n, i) => n + i.total, 0) * 100) / 100, shipping = subtotal === 0 || subtotal >= 1999 ? 0 : 99;
   return { items, subtotal, shipping, total: subtotal + shipping };
 }
@@ -114,20 +116,22 @@ app.post('/api/cart', auth, wrap(async (req, res) => {
   const product = await db.collection('products').findOne({ id: str(req.body.product), active: { $ne: false } });
   if (!product) fail('Product not found', 404);
   const qty = Number(req.body.qty || 1); if (!Number.isInteger(qty) || qty < 1 || qty > 20) fail('Quantity must be between 1 and 20');
-  const size = str(req.body.size || product.size, 40); if (size !== String(product.size)) fail('Choose an available size');
-  const key = { user: req.user.id, product: product.id, size };
+  const variants = variantsFor(product), variant = variants.find(v => v.id === req.body.variantId) || variants.find(v => v.size === str(req.body.size, 40) && (!req.body.color || v.color === str(req.body.color, 80)));
+  if (!variant) fail('Choose an available size and colour');
+  const key = { user: req.user.id, product: product.id, variantId: variant.id };
   const old = await db.collection('cart').findOne(key);
-  if ((old?.qty || 0) + qty > Math.min(product.stockQuantity, 20)) fail('Requested quantity is not available');
+  if ((old?.qty || 0) + qty > Math.min(variant.stockQuantity, 20)) fail('Requested quantity is not available');
   if (old) {
-    const result = await db.collection('cart').updateOne({ ...key, qty: { $lte: Math.min(product.stockQuantity, 20) - qty } }, { $inc: { qty } });
+    const result = await db.collection('cart').updateOne({ ...key, qty: { $lte: Math.min(variant.stockQuantity, 20) - qty } }, { $inc: { qty } });
     if (!result.matchedCount) fail('Your bag changed. Please refresh and try again.', 409);
-  } else await db.collection('cart').insertOne({ id: crypto.randomUUID(), ...key, qty });
+  } else await db.collection('cart').insertOne({ id: crypto.randomUUID(), ...key, size: variant.size, color: variant.color, qty });
   res.json(await getCart(req.user.id));
 }));
 app.patch('/api/cart/:id', auth, wrap(async (req, res) => {
   const row = await db.collection('cart').findOne({ id: req.params.id, user: req.user.id }); if (!row) fail('Cart item not found', 404);
   const p = await db.collection('products').findOne({ id: row.product, active: { $ne: false } }), qty = Number(req.body.qty);
-  if (!Number.isInteger(qty) || qty < 1 || qty > Math.min(p?.stockQuantity || 0, 20)) fail('Requested quantity is not available');
+  const variant = variantsFor(p).find(v => v.id === row.variantId) || variantsFor(p)[0];
+  if (!Number.isInteger(qty) || qty < 1 || qty > Math.min(variant?.stockQuantity || 0, 20)) fail('Requested quantity is not available');
   await db.collection('cart').updateOne({ id: row.id, user: req.user.id }, { $set: { qty } }); res.json(await getCart(req.user.id));
 }));
 app.delete('/api/cart/:id', auth, wrap(async (req, res) => { await db.collection('cart').deleteOne({ id: req.params.id, user: req.user.id }); res.json(await getCart(req.user.id)); }));
@@ -146,18 +150,27 @@ app.post('/api/orders', auth, wrap(async (req, res) => {
     const rows = await db.collection('cart').find({ user: req.user.id }, { session }).toArray(); if (!rows.length) fail('Your bag is empty');
     const items = [];
     for (const row of rows) {
-      const p = await db.collection('products').findOneAndUpdate({ id: row.product, active: { $ne: false }, stockQuantity: { $gte: row.qty } }, { $inc: { stockQuantity: -row.qty } }, { session, returnDocument: 'before' });
-      if (!p) fail('An item is no longer available in the requested quantity', 409);
-      items.push({ product: p.id, name: p.name, pic: p.pic, size: row.size, qty: row.qty, price: p.finalPrice, total: Math.round(p.finalPrice * row.qty * 100) / 100 });
+      const p = await db.collection('products').findOne({ id: row.product, active: { $ne: false } }, { session });
+      const variant = variantsFor(p).find(v => v.id === row.variantId) || variantsFor(p).find(v => v.size === row.size && (!row.color || v.color === row.color));
+      if (!p || !variant || variant.stockQuantity < row.qty) fail('An item is no longer available in the requested quantity', 409);
+      const filter = { id: p.id, active: { $ne: false }, stockQuantity: { $gte: row.qty } };
+      const update = p.variants?.length ? { $inc: { stockQuantity: -row.qty, 'variants.$[variant].stockQuantity': -row.qty } } : { $inc: { stockQuantity: -row.qty } };
+      const options = p.variants?.length ? { session, arrayFilters: [{ 'variant.id': variant.id, 'variant.stockQuantity': { $gte: row.qty } }] } : { session };
+      const changed = await db.collection('products').updateOne(filter, update, options); if (!changed.modifiedCount) fail('An item is no longer available in the requested quantity', 409);
+      items.push({ product: p.id, variantId: variant.id, name: p.name, pic: p.pic, size: variant.size, color: variant.color, qty: row.qty, price: p.finalPrice, total: Math.round(p.finalPrice * row.qty * 100) / 100 });
     }
-    const subtotal = Math.round(items.reduce((n, i) => n + i.total, 0) * 100) / 100, shipping = subtotal >= 1999 ? 0 : 99;
-    order = { id: crypto.randomUUID(), user: req.user.id, key, items, address, subtotal, shipping, total: subtotal + shipping, paymentMode: 'cod', paymentStatus: 'Pending', status: 'Placed', createdAt: new Date() };
+    const subtotal = Math.round(items.reduce((n, i) => n + i.total, 0) * 100) / 100;
+    const code = str(req.body.coupon, 40).toUpperCase(); let coupon = null, discount = 0;
+    if (code) { coupon = await db.collection('coupon').findOne({ code, active: { $ne: false }, expiresAt: { $gt: new Date() }, minimumOrder: { $lte: subtotal } }, { session }); if (!coupon) fail('Coupon is invalid, expired or does not meet the minimum order'); discount = Math.min(subtotal, coupon.type === 'fixed' ? coupon.value : Math.round(subtotal * coupon.value) / 100); }
+    const shipping = subtotal >= 1999 ? 0 : 99;
+    order = { id: crypto.randomUUID(), user: req.user.id, key, items, address, subtotal, discount, coupon: coupon?.code || '', shipping, total: Math.max(0, subtotal - discount + shipping), paymentMode: 'cod', paymentStatus: 'Pending', status: 'Placed', statusHistory: [{ status: 'Placed', at: new Date() }], createdAt: new Date() };
     await db.collection('orders').insertOne(order, { session });
     await db.collection('cart').deleteMany({ user: req.user.id }, { session });
   }); } finally { await session.endSession(); }
   const { _id, ...safe } = order; res.status(201).json(safe);
 }));
 app.get('/api/orders', auth, wrap(async (req, res) => res.json(await db.collection('orders').find({ user: req.user.id }, { projection: { _id: 0, key: 0 } }).sort({ createdAt: -1 }).toArray())));
+app.post('/api/coupons/validate', auth, wrap(async (req, res) => { const cart = await getCart(req.user.id), code = str(req.body.code, 40).toUpperCase(); const coupon = await db.collection('coupon').findOne({ code, active: { $ne: false }, expiresAt: { $gt: new Date() }, minimumOrder: { $lte: cart.subtotal } }, { projection: { _id: 0 } }); if (!coupon) fail('Coupon is invalid, expired or requires a higher order value'); const discount = Math.min(cart.subtotal, coupon.type === 'fixed' ? coupon.value : Math.round(cart.subtotal * coupon.value) / 100); res.json({ code, discount, total: Math.max(0, cart.total - discount) }); }));
 app.post('/api/newsletter', authLimit, wrap(async (req, res) => { await db.collection('newsletter').updateOne({ email: email(req.body.email) }, { $set: { active: true }, $setOnInsert: { id: crypto.randomUUID(), createdAt: new Date() } }, { upsert: true }); res.json({ message: 'You are on the list. Welcome to the edit.' }); }));
 app.post('/api/contactus', authLimit, wrap(async (req, res) => { const data = { id: crypto.randomUUID(), email: email(req.body.email), createdAt: new Date(), status: 'New' }; for (const k of ['name','subject','message']) { data[k] = str(req.body[k], k === 'message' ? 3000 : 200); if (!data[k]) fail('Complete all fields'); } await db.collection('contactus').insertOne(data); res.status(201).json({ message: 'Message received. Our team will be in touch.' }); }));
 app.post('/api/testimonials', auth, wrap(async (req, res) => { const message = str(req.body.message, 1000); if (message.length < 10) fail('Please write at least 10 characters'); await db.collection('testimonial').insertOne({ id: crypto.randomUUID(), user: req.user.id, name: req.user.name, message, active: false, createdAt: new Date() }); res.status(201).json({ message: 'Thank you. Your review has been submitted for approval.' }); }));
@@ -175,12 +188,17 @@ app.post('/api/admin/upload', upload.array('images', 8), wrap(async (req, res) =
   for (const f of req.files) { const result = await new Promise((resolve, reject) => cloudinary.uploader.upload_stream({ folder: 'apna-bazar/products', resource_type: 'image' }, (err, result) => err ? reject(err) : resolve(result)).end(f.buffer)); urls.push(result.secure_url); }
   res.json({ urls });
 }));
-const collections = ['products','maincategory','subcategory','brand','testimonial','orders','users','newsletter','contactus'];
-app.get('/api/admin/:collection', wrap(async (req, res) => { if (!collections.includes(req.params.collection)) fail('Not found', 404); if (req.params.collection === 'users') requireSuperAdmin(req); const rows = await db.collection(req.params.collection).find({}, { projection: { _id: 0, passwordHash: 0, password: 0, key: 0 } }).sort({ createdAt: -1 }).limit(1000).toArray(); res.json(rows); }));
+const collections = ['products','maincategory','subcategory','brand','testimonial','orders','users','coupon','newsletter','contactus'];
+app.get('/api/admin/:collection', wrap(async (req, res) => { if (!collections.includes(req.params.collection)) fail('Not found', 404); if (['users','coupon'].includes(req.params.collection)) requireSuperAdmin(req); const rows = await db.collection(req.params.collection).find({}, { projection: { _id: 0, passwordHash: 0, password: 0, key: 0 } }).sort({ createdAt: -1 }).limit(1000).toArray(); res.json(rows); }));
 function productFields(body) {
   const p = {}; for (const k of ['name','maincategory','subcategory','brand','color','size','description']) p[k] = str(body[k], k === 'description' ? 10000 : 200);
-  if (!p.name || !p.maincategory || !p.subcategory || !p.brand || !p.size) fail('Name, category, type, brand and size are required');
-  p.basePrice = Number(body.basePrice); p.discount = Number(body.discount || 0); p.stockQuantity = Number(body.stockQuantity);
+  if (!p.name || !p.maincategory || !p.subcategory || !p.brand) fail('Name, category, type and brand are required');
+  const rawVariants = Array.isArray(body.variants) ? body.variants : [];
+  p.variants = rawVariants.map(v => ({ id: str(v.id, 80) || crypto.randomUUID(), color: str(v.color, 80), size: str(v.size, 40), stockQuantity: Number(v.stockQuantity) })).filter(v => v.color && v.size && Number.isInteger(v.stockQuantity) && v.stockQuantity >= 0).slice(0, 100);
+  if (!p.variants.length && p.size) p.variants = [{ id: 'legacy', color: p.color || 'Default', size: p.size, stockQuantity: Number(body.stockQuantity) }];
+  if (!p.variants.length) fail('Add at least one valid product variant');
+  p.color = p.variants[0].color; p.size = p.variants[0].size;
+  p.basePrice = Number(body.basePrice); p.discount = Number(body.discount || 0); p.stockQuantity = p.variants.reduce((sum, variant) => sum + variant.stockQuantity, 0);
   if (!Number.isFinite(p.basePrice) || p.basePrice <= 0 || !Number.isFinite(p.discount) || p.discount < 0 || p.discount > 90 || !Number.isInteger(p.stockQuantity) || p.stockQuantity < 0) fail('Check price, discount and stock');
   p.finalPrice = Math.round(p.basePrice * (1 - p.discount / 100) * 100) / 100; p.active = body.active !== false;
   p.pic = Array.isArray(body.pic) ? body.pic.filter(x => typeof x === 'string' && /^https:\/\/res\.cloudinary\.com\//.test(x)).slice(0, 12) : [];
@@ -195,6 +213,11 @@ app.post('/api/admin/:collection', wrap(async (req, res) => {
     const role = str(req.body.role, 30); if (!userRoles.has(role)) fail('Choose a valid role');
     fields = { name: str(req.body.name, 80), email: email(req.body.email), passwordHash: await bcrypt.hash(password, 12), role, active: req.body.active !== false };
     if (fields.name.length < 2) fail('Name is required');
+  }
+  else if (c === 'coupon') {
+    requireSuperAdmin(req); const code = str(req.body.code, 40).toUpperCase().replace(/[^A-Z0-9_-]/g, ''); const type = req.body.type === 'fixed' ? 'fixed' : 'percent', value = Number(req.body.value), minimumOrder = Number(req.body.minimumOrder || 0), expiresAt = new Date(req.body.expiresAt);
+    if (code.length < 3 || !Number.isFinite(value) || value <= 0 || (type === 'percent' && value > 90) || !Number.isFinite(minimumOrder) || minimumOrder < 0 || Number.isNaN(expiresAt.getTime())) fail('Check coupon code, value, minimum order and expiry');
+    fields = { code, name: code, type, value, minimumOrder, expiresAt, active: req.body.active !== false };
   }
   else if (['maincategory','subcategory','brand','testimonial'].includes(c)) { fields = { name: str(req.body.name), active: req.body.active !== false, pic: str(req.body.pic, 1000) }; if (!fields.name) fail('Name is required'); if (c === 'testimonial') fields.message = str(req.body.message, 1000); }
   else fail('Creation is not available for this resource');
@@ -213,6 +236,14 @@ app.patch('/api/admin/:collection/:id', wrap(async (req, res) => {
     if (req.body.paymentStatus === 'Paid') { if (req.body.status !== 'Delivered') fail('Mark the order delivered before confirming cash payment'); fields.paymentStatus = 'Paid'; }
   }
   else if (c === 'contactus') fields = { status: req.body.status === 'Resolved' ? 'Resolved' : 'New' };
+  else if (c === 'coupon') {
+    requireSuperAdmin(req); const current = await db.collection('coupon').findOne({ id: req.params.id }); if (!current) fail('Coupon not found', 404);
+    fields = {}; for (const key of ['active']) if (key in req.body) fields[key] = req.body[key] !== false;
+    if ('code' in req.body) fields.code = fields.name = str(req.body.code, 40).toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+    if ('type' in req.body) fields.type = req.body.type === 'fixed' ? 'fixed' : 'percent';
+    for (const key of ['value','minimumOrder']) if (key in req.body) fields[key] = Number(req.body[key]);
+    if ('expiresAt' in req.body) fields.expiresAt = new Date(req.body.expiresAt);
+  }
   else if (c === 'users') {
     requireSuperAdmin(req);
     if (req.params.id === req.user.id) fail('Manage your own details from your account page');
@@ -223,9 +254,10 @@ app.patch('/api/admin/:collection/:id', wrap(async (req, res) => {
     if (req.body.password) { const p = str(req.body.password, 128); if (p.length < 8) fail('Password must have at least 8 characters'); fields.passwordHash = await bcrypt.hash(p, 12); await db.collection('sessions').deleteMany({ user: req.params.id }); }
   }
   else fail('Update is not available for this resource');
-  const result = await db.collection(c).updateOne({ id: req.params.id }, { $set: fields }); if (!result.matchedCount) fail('Record not found', 404); if (['maincategory','subcategory','brand','testimonial'].includes(c)) clearCatalogCache(); res.json({ ok: true });
+  const update = c === 'orders' && fields.status !== (await db.collection('orders').findOne({ id: req.params.id }))?.status ? { $set: fields, $push: { statusHistory: { status: fields.status, at: new Date() } } } : { $set: fields };
+  const result = await db.collection(c).updateOne({ id: req.params.id }, update); if (!result.matchedCount) fail('Record not found', 404); if (['maincategory','subcategory','brand','testimonial'].includes(c)) clearCatalogCache(); res.json({ ok: true });
 }));
-app.delete('/api/admin/:collection/:id', wrap(async (req, res) => { const c = req.params.collection; if (!['products','maincategory','subcategory','brand','testimonial','newsletter','contactus'].includes(c)) fail('This record cannot be deleted'); if (c === 'products') await db.collection(c).updateOne({ id: req.params.id }, { $set: { active: false } }); else await db.collection(c).deleteOne({ id: req.params.id }); if (['maincategory','subcategory','brand','testimonial'].includes(c)) clearCatalogCache(); res.json({ ok: true }); }));
+app.delete('/api/admin/:collection/:id', wrap(async (req, res) => { const c = req.params.collection; if (!['products','maincategory','subcategory','brand','testimonial','coupon','newsletter','contactus'].includes(c)) fail('This record cannot be deleted'); if (c === 'coupon') requireSuperAdmin(req); if (c === 'products') await db.collection(c).updateOne({ id: req.params.id }, { $set: { active: false } }); else await db.collection(c).deleteOne({ id: req.params.id }); if (['maincategory','subcategory','brand','testimonial'].includes(c)) clearCatalogCache(); res.json({ ok: true }); }));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Endpoint not found' }));
 app.use(express.static(path.join(__dirname, '../build')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../build/index.html')));
@@ -237,15 +269,17 @@ app.use((err, req, res, next) => {
 });
 async function start() {
   await client.connect();
+  await db.collection('cart').dropIndex('user_1_product_1_size_1').catch(error => { if (error.codeName !== 'IndexNotFound') throw error; });
   await Promise.all([
     db.collection('users').createIndex({ email: 1 }, { unique: true }),
     db.collection('sessions').createIndex({ token: 1 }, { unique: true }),
     db.collection('sessions').createIndex({ expires: 1 }, { expireAfterSeconds: 0 }),
     db.collection('products').createIndex({ id: 1 }, { unique: true }),
-    db.collection('cart').createIndex({ user: 1, product: 1, size: 1 }, { unique: true }),
+    db.collection('cart').createIndex({ user: 1, product: 1, variantId: 1 }, { unique: true }),
     db.collection('wishlist').createIndex({ user: 1, product: 1 }, { unique: true }),
     db.collection('orders').createIndex({ user: 1, key: 1 }, { unique: true }),
-    db.collection('newsletter').createIndex({ email: 1 }, { unique: true })
+    db.collection('newsletter').createIndex({ email: 1 }, { unique: true }),
+    db.collection('coupon').createIndex({ code: 1 }, { unique: true })
   ]);
   const port = Number(process.env.API_PORT || process.env.PORT || 5000);
   const server = app.listen(port, () => console.log(`API ready at http://localhost:${port}/api/health (MongoDB connected)`));

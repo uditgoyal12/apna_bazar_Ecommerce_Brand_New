@@ -1,172 +1,610 @@
-const { test, expect } = require('@playwright/test');
-test.describe.configure({ mode: 'serial' });
-const crypto = require('crypto');
-const path = require('path');
-const fs = require('fs');
-const bcrypt = require('bcryptjs');
-const { client, db, cloudinary } = require('../server/config.cjs');
-const run = `qa-${Date.now()}`, password = crypto.randomBytes(18).toString('hex');
-const adminEmail = `${run}-admin@example.test`, buyerEmail = `${run}-buyer@example.test`;
-const headers = { 'X-Requested-With': 'ApnaBazar' };
-let adminId, product, createdProduct, customerId, adminContext, uploaded = [];
-const address = { name: 'QA Test Customer', phone: '9876543210', address: 'Test address, do not fulfil', city: 'New Delhi', state: 'Delhi', pin: '110001' };
+const { test, expect } = require("@playwright/test");
+test.describe.configure({ mode: "serial" });
+const crypto = require("crypto");
+const path = require("path");
+const fs = require("fs");
+const bcrypt = require("bcryptjs");
+const { client, db, cloudinary } = require("../server/config.cjs");
+const run = `qa-${Date.now()}`,
+  password = crypto.randomBytes(18).toString("hex");
+const adminEmail = `${run}-admin@example.test`,
+  buyerEmail = `${run}-buyer@example.test`,
+  couponCode = run.toUpperCase();
+const headers = { "X-Requested-With": "ApnaBazar" };
+let adminId,
+  product,
+  createdProduct,
+  customerId,
+  adminContext,
+  uploaded = [];
+const address = {
+  name: "QA Test Customer",
+  phone: "9876543210",
+  address: "Test address, do not fulfil",
+  city: "New Delhi",
+  state: "Delhi",
+  pin: "110001",
+};
 test.beforeAll(async ({ playwright }) => {
   await client.connect();
   adminId = crypto.randomUUID();
-  await db.collection('users').insertOne({ id: adminId, name: 'QA Store Manager', email: adminEmail, passwordHash: await bcrypt.hash(password, 12), active: true, role: 'Super Admin' });
-  const original = await db.collection('products').findOne({ active: true, stockQuantity: { $gt: 0 } });
+  await db
+    .collection("users")
+    .insertOne({
+      id: adminId,
+      name: "QA Store Manager",
+      email: adminEmail,
+      passwordHash: await bcrypt.hash(password, 12),
+      active: true,
+      role: "Super Admin",
+    });
+  const original = await db
+    .collection("products")
+    .findOne({ active: true, stockQuantity: { $gt: 0 } });
   const { _id, ...copy } = original;
-  product = { ...copy, id: crypto.randomUUID(), name: `${run} Stock Test`, stockQuantity: 1, basePrice: 1000, discount: 10, finalPrice: 900 };
-  await db.collection('products').insertOne(product);
-  adminContext = await playwright.request.newContext({ baseURL: 'http://localhost:5000', extraHTTPHeaders: headers });
-  const login = await adminContext.post('/api/auth/login', { data: { email: adminEmail, password } }); expect(login.ok()).toBeTruthy();
-  fs.mkdirSync(path.join(__dirname, '../artifacts'), { recursive: true });
+  product = {
+    ...copy,
+    id: crypto.randomUUID(),
+    name: `${run} Stock Test`,
+    stockQuantity: 1,
+    basePrice: 1000,
+    discount: 10,
+    finalPrice: 900,
+  };
+  await db.collection("products").insertOne(product);
+  adminContext = await playwright.request.newContext({
+    baseURL: "http://localhost:5000",
+    extraHTTPHeaders: headers,
+  });
+  const login = await adminContext.post("/api/auth/login", {
+    data: { email: adminEmail, password },
+  });
+  expect(login.ok()).toBeTruthy();
+  fs.mkdirSync(path.join(__dirname, "../artifacts"), { recursive: true });
 });
 test.afterAll(async () => {
   // Delete only this run's fixtures. Original inventory and historical records are untouched.
-  const users = await db.collection('users').find({ email: { $regex: `^${run}-` } }).toArray();
-  const ids = users.map(u => u.id);
-  for (const c of ['cart','wishlist','orders','sessions','testimonial']) await db.collection(c).deleteMany({ user: { $in: ids } });
-  for (const c of ['newsletter','contactus']) await db.collection(c).deleteMany({ email: { $regex: `^${run}-` } });
-  await db.collection('products').deleteMany({ name: { $regex: `^${run}` } });
-  for (const c of ['maincategory','subcategory','brand']) await db.collection(c).deleteMany({ name: { $regex: `^${run}` } });
-  await db.collection('users').deleteMany({ id: { $in: ids } });
-  for (const url of uploaded) { const publicId = url.split('/upload/')[1]?.replace(/^v\d+\//, '').replace(/\.[^.]+$/, ''); if (publicId?.startsWith('apna-bazar/products/') || publicId?.startsWith('apna-bazar/profiles/')) await cloudinary.uploader.destroy(publicId); }
-  await adminContext?.dispose(); await client.close();
+  const users = await db
+    .collection("users")
+    .find({ email: { $regex: `^${run}-` } })
+    .toArray();
+  const ids = users.map((u) => u.id);
+  for (const c of ["cart", "wishlist", "orders", "sessions", "testimonial"])
+    await db.collection(c).deleteMany({ user: { $in: ids } });
+  await db.collection("coupon").deleteMany({ code: couponCode });
+  for (const c of ["newsletter", "contactus"])
+    await db.collection(c).deleteMany({ email: { $regex: `^${run}-` } });
+  await db.collection("products").deleteMany({ name: { $regex: `^${run}` } });
+  for (const c of ["maincategory", "subcategory", "brand"])
+    await db.collection(c).deleteMany({ name: { $regex: `^${run}` } });
+  await db.collection("users").deleteMany({ id: { $in: ids } });
+  for (const url of uploaded) {
+    const publicId = url
+      .split("/upload/")[1]
+      ?.replace(/^v\d+\//, "")
+      .replace(/\.[^.]+$/, "");
+    if (
+      publicId?.startsWith("apna-bazar/products/") ||
+      publicId?.startsWith("apna-bazar/profiles/")
+    )
+      await cloudinary.uploader.destroy(publicId);
+  }
+  await adminContext?.dispose();
+  await client.close();
 });
-test('desktop catalog, search, filters and responsive mobile navigation', async ({ page }) => {
-  const errors = []; page.on('pageerror', e => errors.push(e.message));
-  await page.goto('/'); await expect(page.getByRole('heading', { name: /Good style/ })).toBeVisible();
-  await expect(page.locator('.category-card')).toHaveCount(3);
-  await expect(page.locator('.product-card')).toHaveCount(8);
-  await page.locator('.hero-visual img').evaluate(img => img.decode());
-  await page.locator('img').evaluateAll(images => Promise.all(images.map(img => { img.loading = 'eager'; return img.decode().catch(() => {}); })));
-  await page.screenshot({ path: 'artifacts/home-desktop.png', fullPage: true });
-  await page.goto('/shop?maincategory=Female&inStock=true&sort=price-low');
-  await expect(page.getByRole('heading', { name: 'Women, your way.' })).toBeVisible();
-  await expect(page.locator('.product-card').first()).toBeVisible();
-  await page.getByRole('textbox', { name: 'Search products', exact: true }).fill('no-such-piece-qa');
-  await page.getByRole('button', { name: 'Apply search' }).click();
-  await expect(page.getByRole('heading', { name: 'Nothing here just yet.' })).toBeVisible();
-  await page.setViewportSize({ width: 390, height: 844 }); await page.goto('/');
-  await expect(page.locator('.category-card')).toHaveCount(3);
-  await page.screenshot({ path: 'artifacts/home-mobile.png', fullPage: true });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
-  await page.getByRole('button', { name: 'Toggle menu' }).click();
-  await page.getByRole('navigation').getByRole('link', { name: 'Women', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Women, your way.' })).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+test("desktop catalog, search, filters and responsive mobile navigation", async ({
+  page,
+}) => {
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: /Good style/ })).toBeVisible();
+  await expect(page.locator(".category-card")).toHaveCount(3);
+  await expect(page.locator(".product-card")).toHaveCount(8);
+  await page.locator(".hero-visual img").evaluate((img) => img.decode());
+  await page.locator("img").evaluateAll((images) =>
+    Promise.all(
+      images.map((img) => {
+        img.loading = "eager";
+        return img.decode().catch(() => {});
+      }),
+    ),
+  );
+  await page.screenshot({ path: "artifacts/home-desktop.png", fullPage: true });
+  await page.goto("/shop?maincategory=Female&inStock=true&sort=price-low");
+  await expect(
+    page.getByRole("heading", { name: "Women, your way." }),
+  ).toBeVisible();
+  await expect(page.locator(".product-card").first()).toBeVisible();
+  await page.locator(".product-card").first().getByRole("button", { name: "Quick view" }).click();
+  await expect(page.getByRole("dialog", { name: /Quick view:/ })).toBeVisible();
+  await page.getByRole("button", { name: "Close quick view" }).click();
+  await page
+    .getByRole("textbox", { name: "Search products", exact: true })
+    .fill("no-such-piece-qa");
+  await page.getByRole("button", { name: "Apply search" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Nothing here just yet." }),
+  ).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+  await expect(page.locator(".category-card")).toHaveCount(3);
+  await expect(page.getByLabel("Sign in")).toBeVisible();
+  await page.screenshot({ path: "artifacts/home-mobile.png", fullPage: true });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBeTruthy();
+  await page.getByRole("button", { name: "Toggle menu" }).click();
+  await expect(
+    page
+      .getByRole("navigation")
+      .getByRole("link", { name: "Sign in", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("navigation")
+    .getByRole("link", { name: "Women", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Women, your way." }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBeTruthy();
   expect(errors).toEqual([]);
 });
-test('admin creates a product, uploads to Cloudinary and edits live inventory', async ({ page }) => {
-  await page.goto('/login'); await page.getByLabel('Email address', { exact: true }).fill(adminEmail); await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: 'Sign in', exact: true }).click(); await expect(page).toHaveURL(/profile/);
-  await page.goto('/admin'); await page.getByRole('button', { name: 'Add product' }).click();
-  const form = page.locator('.admin-editor');
-  await form.getByLabel('Name', { exact: true }).fill(`${run} Everyday Shirt`);
-  await form.getByLabel('Collection', { exact: true }).selectOption(product.maincategory);
-  await form.getByLabel('Product type', { exact: true }).selectOption(product.subcategory);
-  await form.getByLabel('Brand', { exact: true }).selectOption(product.brand);
-  await form.getByLabel('Colour', { exact: true }).fill('Olive'); await form.getByLabel('Size', { exact: true }).fill('M');
-  await form.getByLabel('Original price (₹)', { exact: true }).fill('1800'); await form.getByLabel('Discount (%)', { exact: true }).fill('10'); await form.getByLabel('Stock quantity', { exact: true }).fill('6');
-  await form.getByLabel('Description', { exact: true }).fill('An integration test fixture. Not a real listing.');
-  await form.getByLabel('Upload images').setInputFiles(path.resolve(__dirname, '../../server/public/product/p1.jpg'));
-  await expect(form.locator('.image-editor img')).toHaveCount(1);
-  uploaded.push(await form.locator('.image-editor img').getAttribute('src'));
+test("admin creates a product, uploads to Cloudinary and edits live inventory", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  await page.getByLabel("Email address", { exact: true }).fill(adminEmail);
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL(/profile/);
+  await page.goto("/admin");
+  await page.getByRole("button", { name: "Add product" }).click();
+  const form = page.locator(".admin-editor");
+  await form.getByLabel("Name", { exact: true }).fill(`${run} Everyday Shirt`);
+  await form
+    .getByLabel("Collection", { exact: true })
+    .selectOption(product.maincategory);
+  await form
+    .getByLabel("Product type", { exact: true })
+    .selectOption(product.subcategory);
+  await form.getByLabel("Brand", { exact: true }).selectOption(product.brand);
+  await form.getByLabel("Colour", { exact: true }).fill("Olive");
+  await form.getByLabel("Size", { exact: true }).fill("M");
+  await form.getByLabel("Original price (₹)", { exact: true }).fill("1800");
+  await form.getByLabel("Discount (%)", { exact: true }).fill("10");
+  await form.getByLabel("Stock quantity", { exact: true }).fill("6");
+  await form.getByLabel("Variants").fill("Olive | M | 6\nNavy | L | 3");
+  await form
+    .getByLabel("Description", { exact: true })
+    .fill("An integration test fixture. Not a real listing.");
+  await form
+    .getByLabel("Upload images")
+    .setInputFiles(
+      path.resolve(__dirname, "../../server/public/product/p1.jpg"),
+    );
+  await expect(form.locator(".image-editor img")).toHaveCount(1);
+  uploaded.push(await form.locator(".image-editor img").getAttribute("src"));
   expect(uploaded[0]).toMatch(/^https:\/\/res\.cloudinary\.com\//);
-  await form.getByRole('button', { name: 'Save changes' }).click(); await expect(form).toHaveCount(0);
-  createdProduct = await db.collection('products').findOne({ name: `${run} Everyday Shirt` }); expect(createdProduct.finalPrice).toBe(1620);
-  await page.getByRole('textbox', { name: 'Search records' }).fill(`${run} Everyday Shirt`);
-  await page.locator('tbody tr').getByRole('button', { name: 'Edit', exact: true }).click();
-  await page.locator('.admin-editor').getByLabel('Stock quantity').fill('8');
-  await page.locator('.admin-editor').getByRole('button', { name: 'Save changes' }).click(); await expect(page.locator('.admin-editor')).toHaveCount(0);
-  expect((await db.collection('products').findOne({ id: createdProduct.id })).stockQuantity).toBe(8);
-  await page.screenshot({ path: 'artifacts/admin-products.png', fullPage: true });
+  await form.getByRole("button", { name: "Save changes" }).click();
+  await expect(form).toHaveCount(0);
+  createdProduct = await db
+    .collection("products")
+    .findOne({ name: `${run} Everyday Shirt` });
+  expect(createdProduct.finalPrice).toBe(1620);
+  expect(createdProduct.variants).toHaveLength(2);
+  expect(createdProduct.stockQuantity).toBe(9);
+  await page
+    .getByRole("textbox", { name: "Search records" })
+    .fill(`${run} Everyday Shirt`);
+  await page
+    .locator("tbody tr")
+    .getByRole("button", { name: "Edit", exact: true })
+    .click();
+  await page.locator(".admin-editor").getByLabel("Stock quantity").fill("8");
+  await page.locator(".admin-editor").getByLabel("Variants").fill("Olive | M | 8\nNavy | L | 3");
+  await page
+    .locator(".admin-editor")
+    .getByRole("button", { name: "Save changes" })
+    .click();
+  await expect(page.locator(".admin-editor")).toHaveCount(0);
+  expect(
+    (await db.collection("products").findOne({ id: createdProduct.id }))
+      .stockQuantity,
+  ).toBe(11);
+  await expect(page.getByText("Low-stock alerts")).toBeVisible();
+  const coupon = await adminContext.post("/api/admin/coupon", { data: { code: couponCode, type: "percent", value: 10, minimumOrder: 100, expiresAt: "2099-12-31", active: true } });
+  expect(coupon.status()).toBe(201);
+  await page.screenshot({
+    path: "artifacts/admin-products.png",
+    fullPage: true,
+  });
 });
-test('buyer signup, profile, wishlist, bag persistence, checkout, order history and support', async ({ page }) => {
-  await page.goto('/signup'); await page.getByLabel('Your name', { exact: true }).fill('QA Test Customer'); await page.getByLabel('Email address', { exact: true }).fill(buyerEmail); await page.getByLabel('Password', { exact: true }).fill(password);
-  await page.getByRole('button', { name: 'Create your account' }).click(); await expect(page).toHaveURL(/profile/);
-  customerId = (await db.collection('users').findOne({ email: buyerEmail })).id;
-  await page.getByLabel('Upload profile photo').setInputFiles(path.resolve(__dirname, '../../server/public/product/p1.jpg'));
-  await expect(page.getByRole('status')).toContainText('Profile photo updated');
-  uploaded.push(await page.locator('.profile-avatar img').getAttribute('src'));
-  for (const [key, label] of [['name','Full name'],['phone','Phone number'],['address','Street address'],['city','City'],['state','State'],['pin','PIN code']]) await page.getByLabel(label, { exact: true }).fill(address[key]);
-  await page.getByRole('button', { name: 'Save your details' }).click(); await expect(page.getByRole('status')).toContainText('saved');
-  await page.reload(); await expect(page.getByLabel('City', { exact: true })).toHaveValue('New Delhi');
-  await page.goto(`/product/${createdProduct.id}`); await page.getByRole('button', { name: 'Save for a little later' }).click(); await expect(page.getByRole('button', { name: 'Saved to your wishlist' })).toBeVisible();
-  await page.getByRole('button', { name: 'Add to bag', exact: true }).click(); await expect(page.getByRole('status')).toContainText('Added to your bag');
-  await page.goto('/cart'); await expect(page.locator('.cart-item')).toHaveCount(1);
-  await page.getByRole('button', { name: `Increase ${createdProduct.name}`, exact: true }).click(); await expect(page.locator('.cart-item .quantity span')).toHaveText('2');
-  await page.reload(); await expect(page.locator('.cart-item .quantity span')).toHaveText('2');
-  await page.getByRole('link', { name: 'Continue to checkout' }).click(); await expect(page.getByRole('heading', { name: 'Make it yours.' })).toBeVisible();
-  await page.screenshot({ path: 'artifacts/checkout-desktop.png', fullPage: true });
+test("buyer signup, profile, wishlist, bag persistence, checkout, order history and support", async ({
+  page,
+}) => {
+  await page.goto("/signup");
+  await page.getByLabel("Your name", { exact: true }).fill("QA Test Customer");
+  await page.getByLabel("Email address", { exact: true }).fill(buyerEmail);
+  await page.getByLabel("Password", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "Create your account" }).click();
+  await expect(page).toHaveURL(/profile/);
+  customerId = (await db.collection("users").findOne({ email: buyerEmail })).id;
+  await page
+    .getByLabel("Upload profile photo")
+    .setInputFiles(
+      path.resolve(__dirname, "../../server/public/product/p1.jpg"),
+    );
+  await expect(page.getByRole("status")).toContainText("Profile photo updated");
+  uploaded.push(await page.locator(".profile-avatar img").getAttribute("src"));
+  for (const [key, label] of [
+    ["name", "Full name"],
+    ["phone", "Phone number"],
+    ["address", "Street address"],
+    ["city", "City"],
+    ["state", "State"],
+    ["pin", "PIN code"],
+  ])
+    await page.getByLabel(label, { exact: true }).fill(address[key]);
+  await page.getByRole("button", { name: "Save your details" }).click();
+  await expect(page.getByRole("status")).toContainText("saved");
+  await page.reload();
+  await expect(page.getByLabel("City", { exact: true })).toHaveValue(
+    "New Delhi",
+  );
+  await page.goto(`/product/${product.id}`);
+  await expect(page.getByRole("heading", { name: product.name })).toBeVisible();
+  await page.goto(`/product/${createdProduct.id}`);
+  await expect(page.getByRole("heading", { name: "Recently viewed." })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Navy", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Save for a little later" }).click();
+  await expect(
+    page.getByRole("button", { name: "Saved to your wishlist" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Add to bag", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("Added to your bag");
+  await page.goto("/cart");
+  await expect(page.locator(".cart-item")).toHaveCount(1);
+  await page
+    .getByRole("button", {
+      name: `Increase ${createdProduct.name}`,
+      exact: true,
+    })
+    .click();
+  await expect(page.locator(".cart-item .quantity span")).toHaveText("2");
+  await page.reload();
+  await expect(page.locator(".cart-item .quantity span")).toHaveText("2");
+  await page.getByLabel("Coupon code").fill(couponCode);
+  await page.getByRole("button", { name: "Apply", exact: true }).click();
+  await expect(page.getByText(`Coupon ${couponCode}`, { exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Continue to checkout" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Make it yours." }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: "artifacts/checkout-desktop.png",
+    fullPage: true,
+  });
   await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
-  await page.screenshot({ path: 'artifacts/checkout-mobile.png', fullPage: true });
-  await page.getByRole('button', { name: /Place order/ }).click(); await expect(page.getByRole('heading', { name: 'It’s officially yours.' })).toBeVisible();
-  const order = await db.collection('orders').findOne({ user: customerId }); expect(order.total).toBe(3240); expect(order.shipping).toBe(0); expect(order.items[0].qty).toBe(2); expect(order.paymentStatus).toBe('Pending');
-  expect((await db.collection('products').findOne({ id: createdProduct.id })).stockQuantity).toBe(6);
-  expect(await db.collection('cart').countDocuments({ user: customerId })).toBe(0);
-  await page.getByRole('link', { name: 'View your orders', exact: true }).click(); await expect(page.locator('.order-card')).toHaveCount(1);
-  const update = await adminContext.patch(`/api/admin/orders/${order.id}`, { data: { status: 'Shipped' } }); expect(update.ok()).toBeTruthy(); await page.reload(); await expect(page.locator('.order-card .status-badge')).toHaveText('Shipped');
-  await page.goto('/wishlist'); await expect(page.locator('.product-card')).toHaveCount(1);
-  await page.locator('.product-card').getByRole('button', { name: /Remove.*wishlist/ }).click(); await expect(page.getByRole('heading', { name: 'A place for your favourites.' })).toBeVisible();
-  await page.goto('/contactus'); const f = page.locator('.contact-layout form'); await f.getByLabel('Your name').fill('QA Test Customer'); await f.getByLabel('Email address').fill(buyerEmail); await f.getByLabel('What’s on your mind?').fill('QA integration check'); await f.getByLabel('Your message').fill('Test message. Please do not respond.'); await f.getByRole('button', { name: 'Send your message' }).click(); await expect(page.getByRole('status')).toContainText('Message received');
-  await page.locator('.newsletter').getByLabel('Your email address').fill(buyerEmail); await page.getByRole('button', { name: 'Subscribe to newsletter' }).click(); await expect(page.getByRole('status')).toContainText('on the list');
-  expect(await db.collection('contactus').countDocuments({ email: buyerEmail })).toBe(1); expect(await db.collection('newsletter').countDocuments({ email: buyerEmail })).toBe(1);
-  await page.goto('/profile'); await page.getByRole('button', { name: 'Sign out', exact: true }).click(); await expect(page).toHaveURL('http://localhost:3000/'); await page.goto('/cart'); await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBeTruthy();
+  await page.screenshot({
+    path: "artifacts/checkout-mobile.png",
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: /Place order/ }).click();
+  await expect(
+    page.getByRole("heading", { name: "It’s officially yours." }),
+  ).toBeVisible();
+  const order = await db.collection("orders").findOne({ user: customerId });
+  expect(order.total).toBe(2916);
+  expect(order.discount).toBe(324);
+  expect(order.coupon).toBe(couponCode);
+  expect(order.shipping).toBe(0);
+  expect(order.items[0].qty).toBe(2);
+  expect(order.paymentStatus).toBe("Pending");
+  expect(
+    (await db.collection("products").findOne({ id: createdProduct.id }))
+      .stockQuantity,
+  ).toBe(9);
+  expect(await db.collection("cart").countDocuments({ user: customerId })).toBe(
+    0,
+  );
+  await page
+    .getByRole("link", { name: "View your orders", exact: true })
+    .click();
+  await expect(page.locator(".order-card")).toHaveCount(1);
+  const update = await adminContext.patch(`/api/admin/orders/${order.id}`, {
+    data: { status: "Shipped" },
+  });
+  expect(update.ok()).toBeTruthy();
+  await page.reload();
+  await expect(page.locator(".order-card .status-badge")).toHaveText("Shipped");
+  await expect(page.locator(".order-timeline > div")).toHaveCount(4);
+  await expect(page.locator(".order-timeline > div.active")).toHaveCount(3);
+  await page.goto("/wishlist");
+  await expect(page.locator(".product-card")).toHaveCount(1);
+  await page
+    .locator(".product-card")
+    .getByRole("button", { name: /Remove.*wishlist/ })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "A place for your favourites." }),
+  ).toBeVisible();
+  await page.goto("/contactus");
+  const f = page.locator(".contact-layout form");
+  await f.getByLabel("Your name").fill("QA Test Customer");
+  await f.getByLabel("Email address").fill(buyerEmail);
+  await f.getByLabel("What’s on your mind?").fill("QA integration check");
+  await f
+    .getByLabel("Your message")
+    .fill("Test message. Please do not respond.");
+  await f.getByRole("button", { name: "Send your message" }).click();
+  await expect(page.getByRole("status")).toContainText("Message received");
+  await page
+    .locator(".newsletter")
+    .getByLabel("Your email address")
+    .fill(buyerEmail);
+  await page.getByRole("button", { name: "Subscribe to newsletter" }).click();
+  await expect(page.getByRole("status")).toContainText("on the list");
+  expect(
+    await db.collection("contactus").countDocuments({ email: buyerEmail }),
+  ).toBe(1);
+  expect(
+    await db.collection("newsletter").countDocuments({ email: buyerEmail }),
+  ).toBe(1);
+  await page.goto("/profile");
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(page).toHaveURL("http://localhost:3000/");
+  await page.goto("/cart");
+  await expect(
+    page.getByRole("heading", { name: "Welcome back." }),
+  ).toBeVisible();
 });
-test('API rejects privilege escalation, protects ownership, ignores price tampering and prevents overselling', async ({ playwright }) => {
-  const anonymous = await playwright.request.newContext({ baseURL: 'http://localhost:5000', extraHTTPHeaders: headers });
-  expect((await anonymous.get('/api/admin/users')).status()).toBe(401);
+test("API rejects privilege escalation, protects ownership, ignores price tampering and prevents overselling", async ({
+  playwright,
+}) => {
+  const anonymous = await playwright.request.newContext({
+    baseURL: "http://localhost:5000",
+    extraHTTPHeaders: headers,
+  });
+  expect((await anonymous.get("/api/admin/users")).status()).toBe(401);
   const contexts = [];
   for (let i = 0; i < 2; i++) {
-    const ctx = await playwright.request.newContext({ baseURL: 'http://localhost:5000', extraHTTPHeaders: headers }); contexts.push(ctx);
-    const signup = await ctx.post('/api/auth/signup', { data: { name: 'QA API Customer', email: `${run}-api${i}@example.test`, password, role: 'Admin' } }); expect(signup.status()).toBe(201); const u = await signup.json(); expect(u.role).toBe('Buyer'); expect(u.passwordHash).toBeUndefined();
-    expect((await ctx.get('/api/admin/products')).status()).toBe(403);
-    expect((await ctx.post('/api/cart', { data: { product: product.id, qty: -1, size: product.size } })).status()).toBe(400);
-    expect((await ctx.post('/api/cart', { data: { product: product.id, qty: 1, size: product.size, price: 1, total: 1 } })).ok()).toBeTruthy();
+    const ctx = await playwright.request.newContext({
+      baseURL: "http://localhost:5000",
+      extraHTTPHeaders: headers,
+    });
+    contexts.push(ctx);
+    const signup = await ctx.post("/api/auth/signup", {
+      data: {
+        name: "QA API Customer",
+        email: `${run}-api${i}@example.test`,
+        password,
+        role: "Admin",
+      },
+    });
+    expect(signup.status()).toBe(201);
+    const u = await signup.json();
+    expect(u.role).toBe("Buyer");
+    expect(u.passwordHash).toBeUndefined();
+    expect((await ctx.get("/api/admin/products")).status()).toBe(403);
+    expect(
+      (
+        await ctx.post("/api/cart", {
+          data: { product: product.id, qty: -1, size: product.size },
+        })
+      ).status(),
+    ).toBe(400);
+    expect(
+      (
+        await ctx.post("/api/cart", {
+          data: {
+            product: product.id,
+            qty: 1,
+            size: product.size,
+            price: 1,
+            total: 1,
+          },
+        })
+      ).ok(),
+    ).toBeTruthy();
   }
-  const cart1 = await (await contexts[0].get('/api/cart')).json(); expect(cart1.subtotal).toBe(900); expect(cart1.total).toBe(999);
-  expect((await contexts[1].patch(`/api/cart/${cart1.items[0].id}`, { data: { qty: 1 } })).status()).toBe(404);
-  expect((await contexts[0].post('/api/orders', { headers: { 'Idempotency-Key': crypto.randomUUID() }, data: { address, paymentMode: 'online' } })).status()).toBe(400);
+  const cart1 = await (await contexts[0].get("/api/cart")).json();
+  expect(cart1.subtotal).toBe(900);
+  expect(cart1.total).toBe(999);
+  expect(
+    (
+      await contexts[1].patch(`/api/cart/${cart1.items[0].id}`, {
+        data: { qty: 1 },
+      })
+    ).status(),
+  ).toBe(404);
+  expect(
+    (
+      await contexts[0].post("/api/orders", {
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        data: { address, paymentMode: "online" },
+      })
+    ).status(),
+  ).toBe(400);
   const keys = [crypto.randomUUID(), crypto.randomUUID()];
-  const results = await Promise.all(contexts.map((ctx, i) => ctx.post('/api/orders', { headers: { 'Idempotency-Key': keys[i] }, data: { address, paymentMode: 'cod', total: 1, paymentStatus: 'Paid' } })));
-  expect(results.map(r => r.status()).sort()).toEqual([201, 409]);
-  const winner = results.findIndex(r => r.status() === 201), order = await results[winner].json(); expect(order.total).toBe(999); expect(order.paymentStatus).toBe('Pending');
-  const retry = await contexts[winner].post('/api/orders', { headers: { 'Idempotency-Key': keys[winner] }, data: { address, paymentMode: 'cod' } }); expect((await retry.json()).id).toBe(order.id);
-  expect((await db.collection('products').findOne({ id: product.id })).stockQuantity).toBe(0);
-  expect(await db.collection('orders').countDocuments({ 'items.product': product.id })).toBe(1);
-  expect((await (await contexts[1 - winner].get('/api/orders')).json()).length).toBe(0);
-  const evil = await anonymous.post('/api/newsletter', { headers: { Origin: 'https://untrusted.example' }, data: { email: buyerEmail } }); expect(evil.status()).toBe(403);
-  for (const ctx of contexts) await ctx.dispose(); await anonymous.dispose();
+  const results = await Promise.all(
+    contexts.map((ctx, i) =>
+      ctx.post("/api/orders", {
+        headers: { "Idempotency-Key": keys[i] },
+        data: { address, paymentMode: "cod", total: 1, paymentStatus: "Paid" },
+      }),
+    ),
+  );
+  expect(results.map((r) => r.status()).sort()).toEqual([201, 409]);
+  const winner = results.findIndex((r) => r.status() === 201),
+    order = await results[winner].json();
+  expect(order.total).toBe(999);
+  expect(order.paymentStatus).toBe("Pending");
+  const retry = await contexts[winner].post("/api/orders", {
+    headers: { "Idempotency-Key": keys[winner] },
+    data: { address, paymentMode: "cod" },
+  });
+  expect((await retry.json()).id).toBe(order.id);
+  expect(
+    (await db.collection("products").findOne({ id: product.id })).stockQuantity,
+  ).toBe(0);
+  expect(
+    await db
+      .collection("orders")
+      .countDocuments({ "items.product": product.id }),
+  ).toBe(1);
+  expect(
+    (await (await contexts[1 - winner].get("/api/orders")).json()).length,
+  ).toBe(0);
+  const evil = await anonymous.post("/api/newsletter", {
+    headers: { Origin: "https://untrusted.example" },
+    data: { email: buyerEmail },
+  });
+  expect(evil.status()).toBe(403);
+  for (const ctx of contexts) await ctx.dispose();
+  await anonymous.dispose();
 });
-test('admin category/brand/user management, review moderation and messages are persisted', async ({ playwright }) => {
-  for (const collection of ['maincategory','subcategory','brand']) {
-    const created = await adminContext.post(`/api/admin/${collection}`, { data: { name: `${run} ${collection}`, pic: product.pic[0], active: true } }); expect(created.status()).toBe(201); const row = await created.json();
-    expect((await (await adminContext.get('/api/catalog')).json())[collection].some(c => c.id === row.id)).toBeTruthy();
-    expect((await adminContext.patch(`/api/admin/${collection}/${row.id}`, { data: { active: false } })).ok()).toBeTruthy();
-    expect((await (await adminContext.get('/api/catalog')).json())[collection].some(c => c.id === row.id)).toBeFalsy();
-    expect((await adminContext.delete(`/api/admin/${collection}/${row.id}`)).ok()).toBeTruthy();
+test("admin category/brand/user management, review moderation and messages are persisted", async ({
+  playwright,
+}) => {
+  for (const collection of ["maincategory", "subcategory", "brand"]) {
+    const created = await adminContext.post(`/api/admin/${collection}`, {
+      data: { name: `${run} ${collection}`, pic: product.pic[0], active: true },
+    });
+    expect(created.status()).toBe(201);
+    const row = await created.json();
+    expect(
+      (await (await adminContext.get("/api/catalog")).json())[collection].some(
+        (c) => c.id === row.id,
+      ),
+    ).toBeTruthy();
+    expect(
+      (
+        await adminContext.patch(`/api/admin/${collection}/${row.id}`, {
+          data: { active: false },
+        })
+      ).ok(),
+    ).toBeTruthy();
+    expect(
+      (await (await adminContext.get("/api/catalog")).json())[collection].some(
+        (c) => c.id === row.id,
+      ),
+    ).toBeFalsy();
+    expect(
+      (await adminContext.delete(`/api/admin/${collection}/${row.id}`)).ok(),
+    ).toBeTruthy();
   }
-  const createdUser = await adminContext.post('/api/admin/users', { data: { name: 'QA Managed Customer', email: `${run}-managed@example.test`, password, role: 'Buyer' } }); expect(createdUser.status()).toBe(201); const managed = await createdUser.json(); expect(managed.passwordHash).toBeUndefined();
-  expect((await adminContext.patch(`/api/admin/users/${managed.id}`, { data: { name: 'QA Updated Customer', active: false } })).ok()).toBeTruthy();
-  const adminOnly = await playwright.request.newContext({ baseURL: 'http://localhost:5000', extraHTTPHeaders: headers });
+  const createdUser = await adminContext.post("/api/admin/users", {
+    data: {
+      name: "QA Managed Customer",
+      email: `${run}-managed@example.test`,
+      password,
+      role: "Buyer",
+    },
+  });
+  expect(createdUser.status()).toBe(201);
+  const managed = await createdUser.json();
+  expect(managed.passwordHash).toBeUndefined();
+  expect(
+    (
+      await adminContext.patch(`/api/admin/users/${managed.id}`, {
+        data: { name: "QA Updated Customer", active: false },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  const adminOnly = await playwright.request.newContext({
+    baseURL: "http://localhost:5000",
+    extraHTTPHeaders: headers,
+  });
   const adminEmailOnly = `${run}-admin-only@example.test`;
-  await db.collection('users').insertOne({ id: crypto.randomUUID(), name: 'QA Admin Only', email: adminEmailOnly, passwordHash: await bcrypt.hash(password, 12), active: true, role: 'Admin' });
-  expect((await adminOnly.post('/api/auth/login', { data: { email: adminEmailOnly, password } })).ok()).toBeTruthy();
-  expect((await adminOnly.get('/api/admin/products')).status()).toBe(200);
-  expect((await adminOnly.get('/api/admin/users')).status()).toBe(403);
+  await db
+    .collection("users")
+    .insertOne({
+      id: crypto.randomUUID(),
+      name: "QA Admin Only",
+      email: adminEmailOnly,
+      passwordHash: await bcrypt.hash(password, 12),
+      active: true,
+      role: "Admin",
+    });
+  expect(
+    (
+      await adminOnly.post("/api/auth/login", {
+        data: { email: adminEmailOnly, password },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  expect((await adminOnly.get("/api/admin/products")).status()).toBe(200);
+  expect((await adminOnly.get("/api/admin/users")).status()).toBe(403);
+  expect((await adminOnly.get("/api/admin/coupon")).status()).toBe(403);
   await adminOnly.dispose();
-  const buyer = await playwright.request.newContext({ baseURL: 'http://localhost:5000', extraHTTPHeaders: headers });
-  expect((await buyer.post('/api/auth/login', { data: { email: managed.email, password } })).status()).toBe(401);
-  expect((await buyer.post('/api/auth/login', { data: { email: buyerEmail, password } })).ok()).toBeTruthy();
-  expect((await buyer.post('/api/testimonials', { data: { message: `${run} review awaiting moderation` } })).status()).toBe(201);
-  const review = await db.collection('testimonial').findOne({ user: customerId }); expect(review.active).toBe(false);
-  expect((await adminContext.patch(`/api/admin/testimonial/${review.id}`, { data: { active: true } })).ok()).toBeTruthy();
-  expect((await (await buyer.get('/api/catalog')).json()).testimonial.some(t => t.id === review.id)).toBeTruthy();
-  expect((await adminContext.delete(`/api/admin/testimonial/${review.id}`)).ok()).toBeTruthy();
-  const message = await db.collection('contactus').findOne({ email: buyerEmail }); expect((await adminContext.patch(`/api/admin/contactus/${message.id}`, { data: { status: 'Resolved' } })).ok()).toBeTruthy();
-  expect((await db.collection('contactus').findOne({ id: message.id })).status).toBe('Resolved');
+  const buyer = await playwright.request.newContext({
+    baseURL: "http://localhost:5000",
+    extraHTTPHeaders: headers,
+  });
+  expect(
+    (
+      await buyer.post("/api/auth/login", {
+        data: { email: managed.email, password },
+      })
+    ).status(),
+  ).toBe(401);
+  expect(
+    (
+      await buyer.post("/api/auth/login", {
+        data: { email: buyerEmail, password },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  expect(
+    (
+      await buyer.post("/api/testimonials", {
+        data: { message: `${run} review awaiting moderation` },
+      })
+    ).status(),
+  ).toBe(201);
+  const review = await db
+    .collection("testimonial")
+    .findOne({ user: customerId });
+  expect(review.active).toBe(false);
+  expect(
+    (
+      await adminContext.patch(`/api/admin/testimonial/${review.id}`, {
+        data: { active: true },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  expect(
+    (await (await buyer.get("/api/catalog")).json()).testimonial.some(
+      (t) => t.id === review.id,
+    ),
+  ).toBeTruthy();
+  expect(
+    (await adminContext.delete(`/api/admin/testimonial/${review.id}`)).ok(),
+  ).toBeTruthy();
+  const message = await db
+    .collection("contactus")
+    .findOne({ email: buyerEmail });
+  expect(
+    (
+      await adminContext.patch(`/api/admin/contactus/${message.id}`, {
+        data: { status: "Resolved" },
+      })
+    ).ok(),
+  ).toBeTruthy();
+  expect(
+    (await db.collection("contactus").findOne({ id: message.id })).status,
+  ).toBe("Resolved");
   await buyer.dispose();
 });
